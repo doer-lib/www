@@ -1,0 +1,907 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Doer Diagram Viewer</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"
+    integrity="sha512-vc58qvvBdrDR4etbxMdlTt4GBQk1qjvyORR2nrsPsFPyrs+/u5c3+1Ct6upOgdZoIl7eq6k3a1UPDSNAQi/32A=="
+    crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      font-family: system-ui, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    .controls {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+      margin-bottom: 20px;
+      padding: 15px;
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    }
+    button {
+      padding: 8px 16px;
+      font-size: 14px;
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.1s ease;
+      position: relative;
+      top: 0;
+      background: linear-gradient(to bottom, #f8f8f8, #e0e0e0);
+      border: 1px solid #a0a0a0;
+      box-shadow: 0 2px 0 #909090, 0 3px 4px rgba(0,0,0,0.15);
+      color: #333;
+    }
+    button:hover {
+      background: linear-gradient(to bottom, #fff, #e8e8e8);
+    }
+    button:active {
+      top: 2px;
+      box-shadow: 0 0 0 #909090, 0 1px 2px rgba(0,0,0,0.15);
+    }
+    button:disabled {
+      background: #e0e0e0;
+      color: #999;
+      box-shadow: 0 2px 0 #c0c0c0, 0 3px 4px rgba(0,0,0,0.1);
+      cursor: not-allowed;
+    }
+    .file-buttons {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .file-buttons button.selected {
+      top: 2px;
+      background: linear-gradient(to bottom, #d8d8d8, #c0c0c0);
+      border-color: #808080;
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.2);
+    }
+    .file-buttons button.selected:hover {
+      background: linear-gradient(to bottom, #e0e0e0, #c8c8c8);
+    }
+    input[type="file"] {
+      padding: 8px;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      background: white;
+      cursor: pointer;
+    }
+    #svg-container {
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+      overflow: auto;
+      max-height: calc(100vh - 140px);
+    }
+    #svg-container svg {
+      display: block;
+      margin: 0 auto;
+    }
+    .loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 400px;
+      color: #666;
+    }
+    .back-link {
+      position: absolute;
+      top: 20px;
+      left: 20px;
+      color: #0070f3;
+      text-decoration: none;
+      font-size: 14px;
+    }
+    .back-link:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <a href="index.html" class="back-link">&larr; Back</a>
+  <div class="controls">
+    <input type="file" id="fileInput" multiple accept=".svg">
+    <div id="fileButtons" class="file-buttons"></div>
+  </div>
+  <div id="svg-container">
+    <div class="loading">Select SVG files to view diagrams</div>
+  </div>
+
+  <script>
+    const TRANSITION_DURATION = 1000;
+
+    let currentState = 0;
+    let analysis = null;
+    let svgFilenames = [];
+    let isAnimating = false;
+    let nodeCounter = 0;
+    let edgeCounter = 0;
+
+    function extractTranslate(transform) {
+      if (!transform) return { dx: 0, dy: 0 };
+      const match = transform.match(/translate\(\s*([-\d.]+)\s+([-\d.]+)\s*\)/);
+      if (match) {
+        return { dx: parseFloat(match[1]), dy: parseFloat(match[2]) };
+      }
+      return { dx: 0, dy: 0 };
+    }
+
+    function removeTranslate(transform) {
+      if (!transform) return '';
+      return transform.replace(/translate\(\s*[-\d.]+\s+[-\d.]+\s*\)/, '').trim();
+    }
+
+    function applyTranslateToElement(element, dx, dy) {
+      element.querySelectorAll('polygon').forEach(polygon => {
+        const points = polygon.getAttribute('points');
+        if (points) {
+          const newPoints = points.split(/\s+/).map(p => {
+            const [x, y] = p.split(',').map(Number);
+            return `${(x + dx).toFixed(2)},${(y + dy).toFixed(2)}`;
+          }).join(' ');
+          polygon.setAttribute('points', newPoints);
+        }
+      });
+
+      element.querySelectorAll('ellipse').forEach(ellipse => {
+        const cx = parseFloat(ellipse.getAttribute('cx')) || 0;
+        const cy = parseFloat(ellipse.getAttribute('cy')) || 0;
+        ellipse.setAttribute('cx', (cx + dx).toFixed(2));
+        ellipse.setAttribute('cy', (cy + dy).toFixed(2));
+      });
+
+      element.querySelectorAll('text').forEach(text => {
+        const x = parseFloat(text.getAttribute('x')) || 0;
+        const y = parseFloat(text.getAttribute('y')) || 0;
+        text.setAttribute('x', (x + dx).toFixed(2));
+        text.setAttribute('y', (y + dy).toFixed(2));
+      });
+
+      element.querySelectorAll('path').forEach(path => {
+        const d = path.getAttribute('d');
+        if (d) {
+          const newD = d.replace(/([-\d.]+)[,\s]+([-\d.]+)/g, (match, x, y) => {
+            const newX = (parseFloat(x) + dx).toFixed(2);
+            const newY = (parseFloat(y) + dy).toFixed(2);
+            return `${newX},${newY}`;
+          });
+          path.setAttribute('d', newD);
+        }
+      });
+    }
+
+    function generateNodeStableId(matchKey) {
+      if (matchKey.startsWith('null#')) {
+        return `node-null-${nodeCounter++}`;
+      }
+      return `stn${nodeCounter++}`;
+    }
+
+    function generateEdgeStableId() {
+      return `ste${edgeCounter++}`;
+    }
+
+    function buildNodeIdToXlinkMap(svg) {
+      const map = new Map();
+      svg.querySelectorAll('g.node').forEach(node => {
+        const titleEl = node.querySelector('title');
+        const anchorEl = node.querySelector('a');
+        if (titleEl && anchorEl) {
+          const nodeId = titleEl.textContent.trim();
+          const xlinkTitle = anchorEl.getAttribute('xlink:title');
+          if (nodeId && xlinkTitle) {
+            map.set(nodeId, xlinkTitle);
+          }
+        }
+      });
+      return map;
+    }
+
+    function getEdgeSemanticKey(edgeTitle, nodeIdMap) {
+      const match = edgeTitle.match(/^(.+)->(.+)$/);
+      if (!match) return edgeTitle;
+
+      const sourceId = match[1];
+      const targetId = match[2];
+      const sourceXlink = nodeIdMap.get(sourceId) || sourceId;
+      const targetXlink = nodeIdMap.get(targetId) || targetId;
+
+      return `${sourceXlink}->${targetXlink}`;
+    }
+
+    function getTitleContent(element) {
+      const titleEl = element.querySelector('title');
+      return titleEl ? titleEl.textContent.trim() : null;
+    }
+
+    function getXlinkTitle(element) {
+      const anchorEl = element.querySelector('a');
+      return anchorEl ? anchorEl.getAttribute('xlink:title') : null;
+    }
+
+    function extractNodeStyles(nodeElement) {
+      const styles = {
+        polygons: [],
+        ellipses: [],
+        texts: []
+      };
+
+      nodeElement.querySelectorAll('polygon').forEach(polygon => {
+        styles.polygons.push({
+          fill: polygon.getAttribute('fill'),
+          stroke: polygon.getAttribute('stroke'),
+          strokeWidth: polygon.getAttribute('stroke-width')
+        });
+      });
+
+      nodeElement.querySelectorAll('ellipse').forEach(ellipse => {
+        styles.ellipses.push({
+          fill: ellipse.getAttribute('fill'),
+          stroke: ellipse.getAttribute('stroke'),
+          strokeWidth: ellipse.getAttribute('stroke-width')
+        });
+      });
+
+      nodeElement.querySelectorAll('text').forEach(text => {
+        styles.texts.push({
+          fill: text.getAttribute('fill'),
+          fontFamily: text.getAttribute('font-family'),
+          fontSize: text.getAttribute('font-size')
+        });
+      });
+
+      return styles;
+    }
+
+    function extractEdgeGeometry(edgeElement, topLeft) {
+      const geometry = {
+        paths: [],
+        polygons: [],
+        ellipses: [],
+        texts: []
+      };
+
+      edgeElement.querySelectorAll('path').forEach(path => {
+        const d = path.getAttribute('d');
+        if (d) {
+          const newD = d.replace(/([-\d.]+)[,\s]+([-\d.]+)/g, (match, x, y) => {
+            const newX = (parseFloat(x) - topLeft.x).toFixed(2);
+            const newY = (parseFloat(y) - topLeft.y).toFixed(2);
+            return `${newX},${newY}`;
+          });
+          geometry.paths.push({
+            d: newD,
+            fill: path.getAttribute('fill'),
+            stroke: path.getAttribute('stroke'),
+            strokeWidth: path.getAttribute('stroke-width')
+          });
+        }
+      });
+
+      edgeElement.querySelectorAll('polygon').forEach(polygon => {
+        const points = polygon.getAttribute('points');
+        if (points) {
+          const newPoints = points.split(/\s+/).map(p => {
+            const [x, y] = p.split(',').map(Number);
+            return `${(x - topLeft.x).toFixed(2)},${(y - topLeft.y).toFixed(2)}`;
+          }).join(' ');
+          geometry.polygons.push({
+            points: newPoints,
+            fill: polygon.getAttribute('fill'),
+            stroke: polygon.getAttribute('stroke'),
+            strokeWidth: polygon.getAttribute('stroke-width')
+          });
+        }
+      });
+
+      edgeElement.querySelectorAll('ellipse').forEach(ellipse => {
+        const cx = parseFloat(ellipse.getAttribute('cx')) || 0;
+        const cy = parseFloat(ellipse.getAttribute('cy')) || 0;
+        geometry.ellipses.push({
+          cx: (cx - topLeft.x).toFixed(2),
+          cy: (cy - topLeft.y).toFixed(2),
+          rx: ellipse.getAttribute('rx'),
+          ry: ellipse.getAttribute('ry'),
+          fill: ellipse.getAttribute('fill'),
+          stroke: ellipse.getAttribute('stroke')
+        });
+      });
+
+      edgeElement.querySelectorAll('text').forEach(text => {
+        const x = parseFloat(text.getAttribute('x')) || 0;
+        const y = parseFloat(text.getAttribute('y')) || 0;
+        geometry.texts.push({
+          x: (x - topLeft.x).toFixed(2),
+          y: (y - topLeft.y).toFixed(2),
+          content: text.textContent,
+          fontFamily: text.getAttribute('font-family'),
+          fontSize: text.getAttribute('font-size'),
+          fill: text.getAttribute('fill'),
+          textAnchor: text.getAttribute('text-anchor')
+        });
+      });
+
+      return geometry;
+    }
+
+    function extractCenter(nodeElement) {
+      const polygon = nodeElement.querySelector('polygon');
+      if (polygon) {
+        const points = polygon.getAttribute('points');
+        if (points) {
+          const coords = points.split(' ').map(p => {
+            const [x, y] = p.split(',').map(Number);
+            return { x, y };
+          });
+          const centerX = coords.reduce((sum, c) => sum + c.x, 0) / coords.length;
+          const centerY = coords.reduce((sum, c) => sum + c.y, 0) / coords.length;
+          return { x: centerX, y: centerY };
+        }
+      }
+
+      const ellipse = nodeElement.querySelector('ellipse');
+      if (ellipse) {
+        return {
+          x: parseFloat(ellipse.getAttribute('cx')) || 0,
+          y: parseFloat(ellipse.getAttribute('cy')) || 0
+        };
+      }
+
+      return { x: 0, y: 0 };
+    }
+
+    function extractEdgeTopLeft(edgeElement) {
+      const allCoords = [];
+
+      edgeElement.querySelectorAll('path').forEach(path => {
+        const d = path.getAttribute('d');
+        if (d) {
+          const matches = d.matchAll(/([-\d.]+)[,\s]+([-\d.]+)/g);
+          for (const match of matches) {
+            allCoords.push({ x: parseFloat(match[1]), y: parseFloat(match[2]) });
+          }
+        }
+      });
+
+      edgeElement.querySelectorAll('polygon').forEach(polygon => {
+        const points = polygon.getAttribute('points');
+        if (points) {
+          points.split(/\s+/).forEach(p => {
+            const [x, y] = p.split(',').map(Number);
+            if (!isNaN(x) && !isNaN(y)) {
+              allCoords.push({ x, y });
+            }
+          });
+        }
+      });
+
+      if (allCoords.length === 0) {
+        return { x: 0, y: 0 };
+      }
+
+      const minX = Math.min(...allCoords.map(c => c.x));
+      const minY = Math.min(...allCoords.map(c => c.y));
+      return { x: minX, y: minY };
+    }
+
+    function normalizeNodeGeometry(nodeElement, center) {
+      const clone = nodeElement.cloneNode(true);
+
+      clone.querySelectorAll('polygon').forEach(polygon => {
+        const points = polygon.getAttribute('points');
+        if (points) {
+          const newPoints = points.split(' ').map(p => {
+            const [x, y] = p.split(',').map(Number);
+            return `${(x - center.x).toFixed(2)},${(y - center.y).toFixed(2)}`;
+          }).join(' ');
+          polygon.setAttribute('points', newPoints);
+        }
+      });
+
+      clone.querySelectorAll('ellipse').forEach(ellipse => {
+        const cx = parseFloat(ellipse.getAttribute('cx')) || 0;
+        const cy = parseFloat(ellipse.getAttribute('cy')) || 0;
+        ellipse.setAttribute('cx', (cx - center.x).toFixed(2));
+        ellipse.setAttribute('cy', (cy - center.y).toFixed(2));
+      });
+
+      clone.querySelectorAll('text').forEach(text => {
+        const x = parseFloat(text.getAttribute('x')) || 0;
+        const y = parseFloat(text.getAttribute('y')) || 0;
+        text.setAttribute('x', (x - center.x).toFixed(2));
+        text.setAttribute('y', (y - center.y).toFixed(2));
+      });
+
+      clone.querySelectorAll('path').forEach(path => {
+        const d = path.getAttribute('d');
+        if (d) {
+          const newD = d.replace(/([ML])\s*([-\d.]+)[,\s]+([-\d.]+)/g, (match, cmd, x, y) => {
+            const newX = (parseFloat(x) - center.x).toFixed(2);
+            const newY = (parseFloat(y) - center.y).toFixed(2);
+            return `${cmd}${newX},${newY}`;
+          });
+          path.setAttribute('d', newD);
+        }
+      });
+
+      return clone;
+    }
+
+    function parseSvgDom(svgText) {
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(svgText, 'image/svg+xml');
+      const svg = doc.querySelector('svg');
+
+      const graphGroup = svg.querySelector('g#graph0');
+      if (graphGroup) {
+        const originalTransform = graphGroup.getAttribute('transform');
+        const { dx, dy } = extractTranslate(originalTransform);
+
+        if (dx !== 0 || dy !== 0) {
+          applyTranslateToElement(graphGroup, dx, dy);
+        }
+
+        graphGroup.setAttribute('transform', removeTranslate(originalTransform));
+      }
+
+      return {
+        svg,
+        width: svg.getAttribute('width'),
+        height: svg.getAttribute('height'),
+        viewBox: svg.getAttribute('viewBox'),
+        graphTransform: graphGroup ? graphGroup.getAttribute('transform') : '',
+        background: graphGroup ? graphGroup.querySelector(':scope > polygon')?.outerHTML : null
+      };
+    }
+
+    function analyzeAllSvgs(svgTexts) {
+      nodeCounter = 0;
+      edgeCounter = 0;
+
+      const result = {
+        nodesByMatchKey: new Map(),
+        edgesByMatchKey: new Map(),
+        nodes: new Map(),
+        edges: new Map(),
+        svgMeta: []
+      };
+
+      svgTexts.forEach((svgText, svgIndex) => {
+        const parsed = parseSvgDom(svgText);
+        const svg = parsed.svg;
+
+        result.svgMeta.push({
+          width: parsed.width,
+          height: parsed.height,
+          viewBox: parsed.viewBox,
+          graphTransform: parsed.graphTransform,
+          background: parsed.background
+        });
+
+        const nodeIdMap = buildNodeIdToXlinkMap(svg);
+        const nodeOccurrenceCounts = new Map();
+        const edgeOccurrenceCounts = new Map();
+
+        svg.querySelectorAll('g.node').forEach(nodeEl => {
+          const xlinkTitle = getXlinkTitle(nodeEl);
+          if (!xlinkTitle) return;
+
+          const occurrenceIndex = nodeOccurrenceCounts.get(xlinkTitle) || 0;
+          nodeOccurrenceCounts.set(xlinkTitle, occurrenceIndex + 1);
+
+          const matchKey = xlinkTitle === 'null'
+            ? `null#${occurrenceIndex}`
+            : xlinkTitle;
+
+          let stableId = result.nodesByMatchKey.get(matchKey);
+
+          if (!stableId) {
+            stableId = generateNodeStableId(matchKey);
+            result.nodesByMatchKey.set(matchKey, stableId);
+            result.nodes.set(stableId, {
+              stableId,
+              xlinkTitle,
+              matchKey,
+              svgData: new Map()
+            });
+          }
+
+          const center = extractCenter(nodeEl);
+          result.nodes.get(stableId).svgData.set(svgIndex, {
+            position: center,
+            titleContent: getTitleContent(nodeEl),
+            normalizedElement: normalizeNodeGeometry(nodeEl, center),
+            styles: extractNodeStyles(nodeEl)
+          });
+        });
+
+        svg.querySelectorAll('g.edge').forEach(edgeEl => {
+          const edgeTitle = getTitleContent(edgeEl);
+          if (!edgeTitle) return;
+
+          const semanticKey = getEdgeSemanticKey(edgeTitle, nodeIdMap);
+          const occurrenceIndex = edgeOccurrenceCounts.get(semanticKey) || 0;
+          edgeOccurrenceCounts.set(semanticKey, occurrenceIndex + 1);
+          const matchKey = `${semanticKey}#${occurrenceIndex}`;
+
+          let stableId = result.edgesByMatchKey.get(matchKey);
+
+          if (!stableId) {
+            stableId = generateEdgeStableId();
+            result.edgesByMatchKey.set(matchKey, stableId);
+            result.edges.set(stableId, {
+              stableId,
+              semanticKey,
+              matchKey,
+              svgData: new Map()
+            });
+          }
+
+          const topLeft = extractEdgeTopLeft(edgeEl);
+          const geometry = extractEdgeGeometry(edgeEl, topLeft);
+
+          result.edges.get(stableId).svgData.set(svgIndex, {
+            position: topLeft,
+            titleContent: edgeTitle,
+            xlinkTitle: getXlinkTitle(edgeEl),
+            ...geometry
+          });
+        });
+      });
+
+      return result;
+    }
+
+    function renderEdgeGeometry(container, geometry) {
+      geometry.paths.forEach(p => {
+        container.append('path')
+          .attr('d', p.d)
+          .attr('fill', p.fill || 'none')
+          .attr('stroke', p.stroke || 'black')
+          .attr('stroke-width', p.strokeWidth || '1');
+      });
+
+      geometry.polygons.forEach(p => {
+        container.append('polygon')
+          .attr('points', p.points)
+          .attr('fill', p.fill || 'black')
+          .attr('stroke', p.stroke || 'black')
+          .attr('stroke-width', p.strokeWidth || '1');
+      });
+
+      geometry.ellipses.forEach(e => {
+        container.append('ellipse')
+          .attr('cx', e.cx)
+          .attr('cy', e.cy)
+          .attr('rx', e.rx)
+          .attr('ry', e.ry)
+          .attr('fill', e.fill || 'none')
+          .attr('stroke', e.stroke || 'black');
+      });
+
+      geometry.texts.forEach(t => {
+        container.append('text')
+          .attr('x', t.x)
+          .attr('y', t.y)
+          .attr('text-anchor', t.textAnchor || 'middle')
+          .attr('font-family', t.fontFamily)
+          .attr('font-size', t.fontSize)
+          .attr('fill', t.fill || 'black')
+          .text(t.content);
+      });
+    }
+
+    function createSVG(analysisData, svgIndex) {
+      const container = document.getElementById('svg-container');
+      container.innerHTML = '';
+
+      let maxWidth = 0, maxHeight = 0;
+      analysisData.svgMeta.forEach(meta => {
+        const vb = meta.viewBox.split(' ').map(Number);
+        maxWidth = Math.max(maxWidth, vb[2]);
+        maxHeight = Math.max(maxHeight, vb[3]);
+      });
+
+      const svg = d3.select(container)
+        .append('svg')
+        .attr('width', maxWidth)
+        .attr('height', maxHeight)
+        .attr('viewBox', `0 0 ${maxWidth} ${maxHeight}`)
+        .attr('xmlns', 'http://www.w3.org/2000/svg')
+        .attr('xmlns:xlink', 'http://www.w3.org/1999/xlink');
+
+      const currentMeta = analysisData.svgMeta[svgIndex];
+      const graphGroup = svg.append('g')
+        .attr('id', 'graph0')
+        .attr('class', 'graph')
+        .attr('transform', currentMeta.graphTransform || '');
+
+      if (currentMeta.background) {
+        graphGroup.html(currentMeta.background);
+      }
+
+      const edgesLayer = graphGroup.append('g').attr('class', 'edges-layer');
+      const nodesLayer = graphGroup.append('g').attr('class', 'nodes-layer');
+
+      analysisData.edges.forEach((edge, stableId) => {
+        const svgData = edge.svgData.get(svgIndex);
+        if (!svgData) return;
+
+        const wrapper = edgesLayer.append('g')
+          .attr('class', 'edge-group')
+          .attr('data-edge-id', stableId)
+          .attr('transform', `translate(${svgData.position.x}, ${svgData.position.y})`);
+
+        const edgeContainer = wrapper.append('g').attr('class', 'edge');
+        renderEdgeGeometry(edgeContainer, svgData);
+      });
+
+      analysisData.nodes.forEach((node, stableId) => {
+        const svgData = node.svgData.get(svgIndex);
+        if (!svgData) return;
+
+        const wrapper = nodesLayer.append('g')
+          .attr('class', 'node-group')
+          .attr('data-node-id', stableId)
+          .attr('transform', `translate(${svgData.position.x}, ${svgData.position.y})`);
+
+        wrapper.append('g')
+          .attr('class', 'node')
+          .html(svgData.normalizedElement.innerHTML);
+      });
+
+      return svg;
+    }
+
+    async function animateTransition(toSvgIndex) {
+      if (isAnimating) return;
+      isAnimating = true;
+
+      const fromSvgIndex = currentState;
+
+      const svg = d3.select('#svg-container svg');
+      const graphGroup = svg.select('#graph0');
+      const nodesLayer = graphGroup.select('.nodes-layer');
+      const edgesLayer = graphGroup.select('.edges-layer');
+
+      let maxWidth = 0, maxHeight = 0;
+      analysis.svgMeta.forEach(meta => {
+        const vb = meta.viewBox.split(' ').map(Number);
+        maxWidth = Math.max(maxWidth, vb[2]);
+        maxHeight = Math.max(maxHeight, vb[3]);
+      });
+
+      svg.transition()
+        .duration(TRANSITION_DURATION)
+        .attr('height', maxHeight);
+
+      const commonEdgeIds = [];
+      const removeEdgeIds = [];
+      const addEdgeIds = [];
+
+      analysis.edges.forEach((edge, stableId) => {
+        const inFrom = edge.svgData.has(fromSvgIndex);
+        const inTo = edge.svgData.has(toSvgIndex);
+        if (inFrom && inTo) commonEdgeIds.push(stableId);
+        else if (inFrom && !inTo) removeEdgeIds.push(stableId);
+        else if (!inFrom && inTo) addEdgeIds.push(stableId);
+      });
+
+      commonEdgeIds.forEach(stableId => {
+        const edge = analysis.edges.get(stableId);
+        const toData = edge.svgData.get(toSvgIndex);
+        const wrapper = edgesLayer.select(`[data-edge-id="${stableId}"]`);
+        if (wrapper.empty()) return;
+
+        wrapper
+          .transition()
+          .duration(TRANSITION_DURATION)
+          .attr('transform', `translate(${toData.position.x}, ${toData.position.y})`)
+          .on('end', function() {
+            const edgeContainer = d3.select(this).select('.edge');
+            edgeContainer.selectAll('*').remove();
+            renderEdgeGeometry(edgeContainer, toData);
+          });
+      });
+
+      removeEdgeIds.forEach(stableId => {
+        edgesLayer.select(`[data-edge-id="${stableId}"]`)
+          .transition()
+          .duration(TRANSITION_DURATION / 2)
+          .style('opacity', 0)
+          .remove();
+      });
+
+      const commonNodeIds = [];
+      const removeNodeIds = [];
+      const addNodeIds = [];
+
+      analysis.nodes.forEach((node, stableId) => {
+        const inFrom = node.svgData.has(fromSvgIndex);
+        const inTo = node.svgData.has(toSvgIndex);
+        if (inFrom && inTo) commonNodeIds.push(stableId);
+        else if (inFrom && !inTo) removeNodeIds.push(stableId);
+        else if (!inFrom && inTo) addNodeIds.push(stableId);
+      });
+
+      commonNodeIds.forEach(stableId => {
+        const node = analysis.nodes.get(stableId);
+        const toData = node.svgData.get(toSvgIndex);
+        const wrapper = nodesLayer.select(`[data-node-id="${stableId}"]`);
+        if (wrapper.empty()) return;
+
+        wrapper
+          .transition()
+          .duration(TRANSITION_DURATION)
+          .attr('transform', `translate(${toData.position.x}, ${toData.position.y})`)
+          .on('end', function() {
+            const nodeContainer = d3.select(this).select('.node');
+            if (toData.styles) {
+              nodeContainer.selectAll('polygon').each(function(d, i) {
+                const style = toData.styles.polygons[i];
+                if (style) {
+                  const el = d3.select(this);
+                  if (style.fill) el.attr('fill', style.fill);
+                  if (style.stroke) el.attr('stroke', style.stroke);
+                  if (style.strokeWidth) el.attr('stroke-width', style.strokeWidth);
+                }
+              });
+              nodeContainer.selectAll('ellipse').each(function(d, i) {
+                const style = toData.styles.ellipses[i];
+                if (style) {
+                  const el = d3.select(this);
+                  if (style.fill) el.attr('fill', style.fill);
+                  if (style.stroke) el.attr('stroke', style.stroke);
+                  if (style.strokeWidth) el.attr('stroke-width', style.strokeWidth);
+                }
+              });
+              nodeContainer.selectAll('text').each(function(d, i) {
+                const style = toData.styles.texts[i];
+                if (style) {
+                  const el = d3.select(this);
+                  if (style.fill) el.attr('fill', style.fill);
+                  if (style.fontFamily) el.attr('font-family', style.fontFamily);
+                  if (style.fontSize) el.attr('font-size', style.fontSize);
+                }
+              });
+            }
+          });
+      });
+
+      removeNodeIds.forEach(stableId => {
+        nodesLayer.select(`[data-node-id="${stableId}"]`)
+          .transition()
+          .duration(TRANSITION_DURATION / 2)
+          .style('opacity', 0)
+          .remove();
+      });
+
+      setTimeout(() => {
+        addNodeIds.forEach(stableId => {
+          const node = analysis.nodes.get(stableId);
+          const svgData = node.svgData.get(toSvgIndex);
+
+          const wrapper = nodesLayer.append('g')
+            .attr('class', 'node-group')
+            .attr('data-node-id', stableId)
+            .attr('transform', `translate(${svgData.position.x}, ${svgData.position.y})`)
+            .style('opacity', 0);
+
+          wrapper.append('g')
+            .attr('class', 'node')
+            .html(svgData.normalizedElement.innerHTML);
+
+          wrapper.transition()
+            .duration(TRANSITION_DURATION / 2)
+            .style('opacity', 1);
+        });
+      }, TRANSITION_DURATION / 2);
+
+      setTimeout(() => {
+        addEdgeIds.forEach(stableId => {
+          const edge = analysis.edges.get(stableId);
+          const svgData = edge.svgData.get(toSvgIndex);
+
+          const wrapper = edgesLayer.append('g')
+            .attr('class', 'edge-group')
+            .attr('data-edge-id', stableId)
+            .attr('transform', `translate(${svgData.position.x}, ${svgData.position.y})`)
+            .style('opacity', 0);
+
+          const edgeContainer = wrapper.append('g').attr('class', 'edge');
+          renderEdgeGeometry(edgeContainer, svgData);
+
+          wrapper.transition()
+            .duration(TRANSITION_DURATION / 2)
+            .style('opacity', 1);
+        });
+      }, TRANSITION_DURATION / 2);
+
+      const toMeta = analysis.svgMeta[toSvgIndex];
+      graphGroup.transition()
+        .duration(TRANSITION_DURATION)
+        .attr('transform', toMeta.graphTransform || '');
+
+      await new Promise(resolve => setTimeout(resolve, TRANSITION_DURATION + 100));
+
+      currentState = toSvgIndex;
+      updateUI();
+      isAnimating = false;
+    }
+
+    function updateUI() {
+      const buttonsContainer = document.getElementById('fileButtons');
+      buttonsContainer.innerHTML = '';
+
+      svgFilenames.forEach((filename, index) => {
+        const btn = document.createElement('button');
+        btn.textContent = filename;
+        btn.addEventListener('click', () => selectSvg(index));
+        if (index === currentState) {
+          btn.classList.add('selected');
+        }
+        buttonsContainer.appendChild(btn);
+      });
+    }
+
+    function selectSvg(index) {
+      if (index === currentState || isAnimating) return;
+      animateTransition(index);
+    }
+
+    function readFileAsText(file) {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(reader.error);
+        reader.readAsText(file);
+      });
+    }
+
+    async function handleFileSelection(files) {
+      if (files.length === 0) return;
+
+      try {
+        document.getElementById('svg-container').innerHTML =
+          '<div class="loading">Loading SVG files...</div>';
+
+        const svgTexts = await Promise.all(
+          Array.from(files).map(file => readFileAsText(file))
+        );
+
+        svgFilenames = Array.from(files).map(file => file.name);
+        analysis = analyzeAllSvgs(svgTexts);
+        currentState = 0;
+
+        createSVG(analysis, 0);
+        updateUI();
+      } catch (error) {
+        console.error('Error loading SVGs:', error);
+        document.getElementById('svg-container').innerHTML =
+          `<div class="loading" style="color: red;">Error loading SVGs: ${error.message}</div>`;
+      }
+    }
+
+    function init() {
+      const fileInput = document.getElementById('fileInput');
+      fileInput.addEventListener('change', (e) => {
+        handleFileSelection(e.target.files);
+      });
+
+      document.getElementById('svg-container').innerHTML =
+        '<div class="loading">Select SVG files to view diagrams</div>';
+      updateUI();
+    }
+
+    init();
+  </script>
+</body>
+</html>
